@@ -235,13 +235,38 @@ xTaskResumeAll();      // Возобновление задач FreeRTOS
 *   R/W (Read/Write) — регистр для чтения и записи (настройки).
 
 
-===== Измерение температуры
+==== Измерение температуры
 
 Литий-ионные/полимерные аккумуляторы опасно перегревать (риск вздутия, возгорания). Для предотвращения вывода из строя аккумуляторов BME280 измеряет температуру с точностью ±1°C и при повышении темпетаруты больше, чем 60°C система:
 
 .   Включает красный светодиод (аварийная индикация);
 .   Снижает мощность моторов (через ESC) (не является темой нашей работы и не будет включено в разработку);
 .   Пишет лог в память для анализа.
+
+[cols="1,3,2", options="header"]
+.Регистры BME280 для работы с температурой
+|===
+| Адрес (HEX) | Назначение | Размер (байт)
+| `0x88-0x9F` 
+| Калибровочные коэффициенты температуры (T1-T3) 
+| 6 (T1:uint16, T2:int16, T3:int16)
+
+| `0xFA` 
+| MSB температуры (биты 19-12)
+| 1
+
+| `0xFB` 
+| LSB температуры (биты 11-4)
+| 1
+
+| `0xFC` 
+| XLSB температуры (биты 3-0)
+| 1 (младшие 4 бита)
+
+| `0xF4` 
+| Контрольный регистр (ctrl_meas)
+| 1
+|===
 
 В датчике BME280 используется формула компенсации, которая преобразует сырое значение (adc_T) в температуру в градусах Цельсия. Формула учитывает калибровочные коэффициенты, хранящиеся в памяти датчика.
 
@@ -309,44 +334,222 @@ float read_bme280_temp() {
 Все калибровочные коэффициенты должны быть прочитаны при инициализации датчика (адреса 0x88…0x9F). Иначе температура будет неверной!
 ====
 
-
 ==== Измерение давления 
 
+[cols="1,3,2", options="header"]
+.Регистры BME280 для работы с давлением
+|===
+| Адрес (HEX) | Назначение | Размер (байт)
+| `0x8E-0x9F` 
+| Калибровочные коэффициенты давления (P1-P9) 
+| 18 (9xint16/uint16)
 
+| `0xF7` 
+| MSB давления (биты 19-12)
+| 1
 
+| `0xF8` 
+| LSB давления (биты 11-4)
+| 1
 
+| `0xF9` 
+| XLSB давления (биты 3-0)
+| 1 (младшие 4 бита)
 
+| `0xF4` 
+| Контрольный регистр (ctrl_meas)
+| 1
+|===
 
+Для начала работы с давлением нужно настроить режим измерения регистра 0xF4.
 
+[cols="3,7", options="header"]
+.Регистр `0xF4` (ctrl_meas)
+|===
+| Бит | Описание
+| 7:5 | osrs_p (oversampling давления)
+| 4:2 | osrs_t (oversampling температуры)
+| 1:0 | mode (режим работы)
+|===
 
+Пример настройки (нормальный режим, oversampling x4):
 
+[source,cpp]
+----
+uint8_t config = (0b011 << 5) | (0b011 << 2) | 0b11; // osrs_p=3, osrs_t=3, mode=3
+HAL_I2C_Mem_Write(&hi2c2, BME280_ADDR, 0xF4, I2C_MEMADD_SIZE_8BIT, &config, 1, 100);
+----
 
+Считаем давление с датчика BME280.
 
+. Чтение калибровочных коэффициентов (один раз при инициализации):
++
+[source,cpp]
+----
+uint8_t calib_data[18];
+HAL_I2C_Mem_Read(&hi2c2, BME280_ADDR, 0x8E, I2C_MEMADD_SIZE_8BIT, calib_data, 18, 100);
+// P1-P9 хранятся в calib_data[0..17]
+----
 
+. Чтение сырых данных давления:
++
+[source,cpp]
+----
+uint8_t press_data[3];
+HAL_I2C_Mem_Read(&hi2c2, BME280_ADDR, 0xF7, I2C_MEMADD_SIZE_8BIT, press_data, 3, 100);
+uint32_t adc_P = ((press_data[0] << 12) | (press_data[1] << 4) | (press_data[2] >> 4));
+----
 
+. Применение калибровки (формула из даташита):
++
+[source,cpp]
+----
+var1 = (t_fine >> 1) - 64000
+var2 = (((var1 >> 2) * (var1 >> 2)) >> 11) * P6
+var2 = var2 + ((var1 * P5) << 1)
+var2 = (var2 >> 2) + (P4 << 16)
+var1 = (((P3 * (((var1 >> 2) * (var1 >> 2)) >> 13)) >> 3) + ((P2 * var1) >> 1)) >> 18
+var1 = ((32768 + var1) * P1) >> 15
+pressure = 1048576 - adc_P
+pressure = (pressure - (var2 >> 12)) * 3125
+if (pressure < 0x80000000) {
+  pressure = (pressure << 1) / var1
+} else {
+  pressure = (pressure / var1) * 2
+}
+var1 = (P9 * (((pressure >> 3) * (pressure >> 3)) >> 13)) >> 12
+var2 = ((pressure >> 2) * P8) >> 13
+pressure = pressure + ((var1 + var2 + P7) >> 4)
+----
 
+Для перевода давления в высоту (альтитуду) можно использовать барометрическую формулу.
 
+[latexmath]
+.Формула для расчета высоты над уровнем моря (в метрах)
+++++
+h = \frac{T_0}{L_0} \times \left[ \left( \frac{P}{P_0} \right)^{-\frac{R \times L_0}{g \times M}} - 1 \right]
+++++
+где \( P\) – текущее давление (Па); +
+\( P_0\) – давление на уровне моря (стандартное = 101325 Па); +
+\( T_0\) – стандартная температура на уровне моря (288.15 К); +
+\( L_0\) – температурный градиент (0.0065 К/м); +
+\( R\) – универсальная газовая постоянная (8.3144598 Дж/(моль·К)); +
+\( g\) – ускорение свободного падения (9.80665 м/с²); +
+\( M\) – молярная масса сухого воздуха (0.0289644 кг/моль); +
 
+Для STM32 лучше использовать упрощенную формулу (менее ресурсоемкую).
 
+[source,c++]
+.Упрощенная формула
+----
+float pressureToAltitude(float pressure_Pa, float seaLevelPressure = 101325.0f) {
+    return 44330.0f * (1.0f - powf(pressure_Pa / seaLevelPressure, 0.1903f));
+}
+----
 
+Упрощенная формула дает погрешность ~0.3% в тропосфере. Для наших задач подобная погрешность является избыточной. Однако для научных задач следует использовать полную формулу.
 
+Для оптимизации для платы STM32 рекомендуется не использовать powf() из ARM CMSIS-DSP и заменить функцию на линейную аппроксимацию для экономии ресурсов. powf() — это стандартная математическая функция в языке C, которая вычисляет степень числа с плавающей запятой. 
 
+[NOTE]
+====
+Функция powf() требует значительных вычислительных ресурсов на микроконтроллерах (особенно без FPU), что может замедлить работу системы.
+====
 
+Линейная аппроксимация. В формуле для высоты используется powf(P/P0, 0.1903). Заменим её на линейную аппроксимацию в диапазоне давлений 700–1100 гПа (примерно до 3076 м). Тогда оптимизированная функция высоты будет:
 
+[source,c++]
+.Оптимизированная функция высоты
+----
+float approxPow(float x) {  // x = P/P0
+    // Коэффициенты для аппроксимации powf(x, 0.1903)
+    const float a = -0.3667f;
+    const float b = 1.1832f;
+    return a * x + b;
+}
+----
 
-
+Оптимизированный метод для STM32 — линейная аппроксимация, если не нужна сверхточность.
 
 ==== Измерение влажности
 
+[cols="1,3,2", options="header"]
+.Регистры BME280 для работы с влажностью
+|===
+| Адрес (HEX) | Назначение | Размер (байт)
+| `0xA1`      | Калибровочный коэффициент H1 (uint8) | 1
+| `0xE1-0xE7` | Калибровочные коэффициенты H2-H6 (int16/int8) | 7
+| `0xFD`      | MSB влажности (биты 15-8) | 1
+| `0xFE`      | LSB влажности (биты 7-0) | 1
+| `0xF2`      | Контрольный регистр влажности (ctrl_hum) | 1
+|===
 
+Алгоритм работы:
 
+. _Настройка режима:_
++
+[source,cpp]
+----
+// Установка oversampling x2 (биты 2:0 = 010)
+uint8_t ctrl_hum = 0b010;
+HAL_I2C_Mem_Write(&hi2c2, BME280_ADDR, 0xF2, I2C_MEMADD_SIZE_8BIT, &ctrl_hum, 1, 100);
+----
 
+. _Чтение калибровочных коэффициентов:_
++
+[source,cpp]
+----
+uint8_t hum_calib[7];
+HAL_I2C_Mem_Read(&hi2c2, BME280_ADDR, 0xE1, I2C_MEMADD_SIZE_8BIT, hum_calib, 7, 100);
 
+// Разбор коэффициентов:
+int16_t H2 = (hum_calib[1] << 8) | hum_calib[0]; // 0xE1-0xE2
+int16_t H4 = (hum_calib[3] << 4) | (hum_calib[4] & 0x0F); // 0xE4-0xE5 (12 бит)
+int16_t H5 = (hum_calib[5] << 4) | (hum_calib[4] >> 4);   // 0xE5-0xE6 (12 бит)
+----
 
+. _Чтение сырых данных:_
++
+[source,cpp]
+----
+uint8_t hum_data[2];
+HAL_I2C_Mem_Read(&hi2c2, BME280_ADDR, 0xFD, I2C_MEMADD_SIZE_8BIT, hum_data, 2, 100);
+int32_t adc_H = (hum_data[0] << 8) | hum_data[1]; // 16-битное значение
+----
 
+. _Расчёт относительной влажности (формула из даташита):_
++
+[latexmath]
+++++
+var_H = (t_fine - 76800)
+humidity = (adc_H - (H4 \times 64 + H5 \times var_H / 16384)) \times H2 / 65536 \times (1 + H6 / 67108864 \times var_H \times (1 + H3 / 67108864 \times var_H))
+++++
++
+где \( t_fine\) – вычисляется при измерении температуры. +
 
+Пример кода для платы STM32:
 
-
+[source,cpp]
+----
+float readBME280Humidity() {
+    // 1. Чтение калибровочных коэффициентов (один раз при инициализации)
+    static int32_t t_fine = ...; // Получается из температуры
+    
+    // 2. Чтение сырых данных
+    uint8_t data[2];
+    HAL_I2C_Mem_Read(&hi2c2, BME280_ADDR, 0xFD, 1, data, 2, 100);
+    int32_t adc_H = (data[0] << 8) | data[1];
+    
+    // 3. Расчёт по формуле
+    int32_t var_H = (t_fine - 76800);
+    var_H = ((((adc_H << 14) - (H4 << 20) - (H5 * var_H)) + 16384) >> 15) * 
+            (((((((var_H * H6) >> 10) * (((var_H * H3) >> 11) + 32768)) >> 10) + 2097152) * H2 + 8192) >> 14);
+    var_H = var_H - ((((var_H >> 15) * (var_H >> 15)) >> 7) * H1 >> 4);
+    
+    // Ограничение 0-100%
+    return (var_H < 0) ? 0 : (var_H > 100000) ? 100.0f : (float)var_H / 1024.0f;
+}
+----
 
 ==== Датчик DS18B20
 
@@ -364,31 +567,347 @@ DS18B20 – высокоточный цифровой датчик темпер�
 *   Интерфейс связи: 1-Wire (OneWire)
 *   Корпус: TO-92, SOIC-8 или герметичное исполнение
 
+Алгоритм чтения температуры:
+
+. Инициализация шины 1-Wire (Reset Pulse)
+. Отправка команды `0xCC` (Skip ROM) - если датчик один на линии
+. Отправка команды `0x44` (Start Conversion)
+. Ожидание завершения преобразования (750 мс для 12-бит)
+. Reset + Skip ROM (`0xCC`) + команда `0xBE` (Read Scratchpad)
+. Чтение 9 байт (первые 2 байта - температура)
+. Конвертация в градусы
+
+[cols="1,3,2", options="header"]
+.Регистры DS18B20
+|===
+| Адрес | Назначение          | Размер 
+| 0x00-0x01 | Температура (LSB, MSB) | 2 байта
+| 0x02-0x04 | TH, TL, Configuration | 3 байта
+| 0x08      | CRC                  | 1 байт
+|===
 
 
+[source,c++]
+.Код для STM32 (HAL)
+----
+// Настройка GPIO (PA0 как выход с открытым стоком)
+#define DS18B20_PIN  GPIO_PIN_0
+#define DS18B20_PORT GPIOA
 
+// Функция чтения температуры
+float readDS18B20() {
+    uint8_t data[9];
+    
+    // 1. Инициализация
+    HAL_GPIO_WritePin(DS18B20_PORT, DS18B20_PIN, 0);
+    HAL_Delay(480); // Reset pulse
+    HAL_GPIO_WritePin(DS18B20_PORT, DS18B20_PIN, 1);
+    HAL_Delay(60);  // Ожидание Presence pulse
+    
+    // 2. Запуск преобразования
+    write1Wire(0xCC); // Skip ROM
+    write1Wire(0x44); // Convert T
+    HAL_Delay(750);   // Ожидание для 12-бит
+    
+    // 3. Чтение данных
+    reset1Wire();
+    write1Wire(0xCC); // Skip ROM
+    write1Wire(0xBE); // Read Scratchpad
+    for (int i = 0; i < 9; i++) data[i] = read1Wire();
+    
+    // 4. Конвертация
+    int16_t temp_raw = (data[1] << 8) | data[0];
+    return (float)temp_raw / 16.0f; // 12-битный режим
+}
+----
 
-
+[source,c++]
+.Оптимизация для FreeRTOS
+----
+// Задача для периодического опроса
+void vDS18B20Task(void *pvParameters) {
+    while (1) {
+        float temp = readDS18B20();
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Опрос каждую секунду
+    }
+}
+----
 
 
 ////
-=== Настройки АЦП
 
+=== Период измерения с использованием FreeRTOS
 
-=== Таймер
+Для точного соблюдения временных интервалов в FreeRTOS лучше всего использовать vTaskDelayUntil(), который исключает накопление погрешности от времени выполнения кода.
 
+[source,c++]
+.
+----
+#include "FreeRTOS.h"
+#include "task.h"
 
+void vSensorTask(void *pvParameters) {
+    TickType_t xLastWakeTime;
+    const TickType_t xFrequency = pdMS_TO_TICKS(500); // 500 мс в тиках
+    
+    // Запоминаем текущее время при старте
+    xLastWakeTime = xTaskGetTickCount();
 
-=== Протокол USART
+    while (1) {
+        // Выполняем измерения
+        float temp = readDS18B20();
+        float humidity = readBME280Humidity();
+        
+        // Применяем цифровой фильтр
+        // ...
+        
+        // Точная задержка до следующего цикла
+        vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    }
+}
+----
 
-Осуществление передачи данных через USART
+Разница между vTaskDelay() и vTaskDelayUntil():
 
+vTaskDelay(500)	имеет накопление погрешности, что требует дополнительной задержки от текущего момента. vTaskDelayUntil()	имеет фиксированный интервал между концами циклов, за счет чего гарантирует 500 мс между запусками. 
 
+При использования FreeRTOS важна настройка таймера в FreeRTOSConfig.h.
 
-
-=== Flash-память (EEPROM)
+[source,cpp]
+.Настройка таймера
+----
+#define configTICK_RATE_HZ 500  // 1 тик = 1 мс (для pdMS_TO_TICKS(500))
+----
 ////
 
+=== Цифровая фильтрация
+
+[latexmath]
+++++
+\tau = \int\binom{1-e^\frac{-dt}{RC}, RC > 0 sec}{1,RC \leq 0 sec}
+++++
+[latexmath]
+++++
+FilteredValue = OldFiltered + (Value - OldValue) * \tau
+++++
+
+[source,cpp]
+.Реализация цифрового фильтра
+----
+void setTau(float dt, float rc) {
+        tau = (rc <= 0) ? 1.0f : (1.0f - expf(-dt / rc));
+    }
+    float filter(float new_value) {
+        old_value += (new_value - old_value) * tau;
+        return old_value;
+    }
+----
+
+=== Сохранение данных
+
+[cols="1,3,2", options="header"]
+.Варианты хранения данных
+|===
+| Тип памяти       | Описание                  | Объём (XNucleo-F411RE)
+| Внутренний Flash | Встроенная память MCU      | 512 КБ (до 100К записей)
+| EEPROM (эмуляция)| Через Flash с wear-leveling| ~10К циклов записи
+| SD-карта (через SPI) | Внешнее хранилище       | До 32 ГБ
+| FRAM (через I2C) | Энергонезависимая память  | 64 КБ (MB85RC64)
+|===
+
+Реализация сохранения во Flash:
+
+[source,cpp]
+.Настройка эмуляции EEPROM
+----
+#include "stm32f4xx_hal_flash.h"
+
+#define EEPROM_START_ADDR 0x080E0000 // Последние 128 КБ Flash
+#define EEPROM_PAGE_SIZE 0x4000      // 16 КБ сектор
+----
+
+[source,cpp]
+.Функции записи/чтения
+----
+void EE_WriteFloat(uint32_t addr, float value) {
+    HAL_FLASH_Unlock();
+    __HAL_FLASH_CLEAR_FLAG(FLASH_FLAG_EOP | FLASH_FLAG_OPERR | FLASH_FLAG_WRPERR);
+    FLASH_Erase_Sector(FLASH_SECTOR_11, VOLTAGE_RANGE_3);
+    HAL_FLASH_Program(FLASH_TYPEPROGRAM_WORD, addr, *(uint32_t*)&value);
+    HAL_FLASH_Lock();
+}
+
+float EE_ReadFloat(uint32_t addr) {
+    return *(float*)(addr);
+}
+----
+
+[source,cpp]
+.Структура хранения данных
+----
+#pragma pack(push, 1)
+typedef struct {
+    float temperature;
+    float pressure;
+    float humidity;
+    uint32_t timestamp;
+} SensorData;
+#pragma pack(pop)
+
+void SaveData() {
+    SensorData data;
+    data.temperature = getFilteredTemp();
+    // ... заполнение остальных полей
+    
+    EE_WriteFloat(EEPROM_START_ADDR + current_offset, *(float*)&data);
+    current_offset += sizeof(SensorData);
+}
+----
+
+=== USART-настройки
+
+USART (Universal Synchronous/Asynchronous Receiver/Transmitter) — это аппаратный модуль в микроконтроллерах для последовательной передачи данных.
+Поддерживает два режима:
+
+* Асинхронный (UART) — без общего тактового сигнала;
+* Синхронный — с тактовым сигналом (как SPI).
+
+[cols="1,3,2", options="header"]
+.Ключевые регистры USART (для STM32F4xx)
+|===
+| Регистр         | Назначение                          | Биты (важные)
+| USART_CR1       | Управление 1                        | UE, TE, RE, M, PCE, PS
+| USART_CR2       | Управление 2                        | STOP[1:0] (стоп-биты)
+| USART_CR3       | Управление 3                        | DMAT (DMA для передачи)
+| USART_BRR       | Baud Rate Register                  | DIV_Mantissa, DIV_Fraction
+| USART_DR        | Data Register (приём/передача)      | 9 бит данных
+| USART_ISR       | Status Register                     | TXE, TC, RXNE, ORE
+| USART_GTPR      | Guard Time (только для SmartCard)   | -
+|===
+
+
+Рассмотрим дитально регистры.
+
+USART_CR1 это главный регистр управления USART. Определяет основные параметры работы.
+
+[cols="1,2", options="header"]
+.USART_CR1 (Control Register 1)
+|===
+| Бит | Описание
+| 13 UE       | Включение USART (1 - включён)
+| 12 M        | Длина слова (0 - 8 бит, 1 - 9 бит)
+| 10 PCE      | Контроль чётности (1 - включён)
+| 9 PS        | Выбор чётности (0 - чётная, 1 - нечётная)
+| 8 PEIE      | Прерывание по ошибке чётности
+| 3 TE        | Включение передачи (1 - включён)
+| 2 RE        | Включение приёма (1 - включён)
+|===
+
+
+USART_BRR задаёт скорость обмена (бодрейт). Рассчитывается по формуле:
+[latexmath]
+++++
+BRR = \frac{f_{CK}}{16 \times BaudRate}
+++++
+где \({f_{CK}}\) – тактовая частота USART (обычно 84 МHz на STM32F4).; +
+
+
+[source,cpp]
+.Настройка USART через HAL
+----
+// 1. Инициализация структуры
+UART_HandleTypeDef huart2;
+huart2.Instance = USART2;
+huart2.Init = {
+    .BaudRate = 115200,
+    .WordLength = UART_WORDLENGTH_8B,
+    .StopBits = UART_STOPBITS_1,
+    .Parity = UART_PARITY_NONE,
+    .Mode = UART_MODE_TX_RX,
+    .HwFlowCtl = UART_HWCONTROL_NONE,
+    .OverSampling = UART_OVERSAMPLING_16
+};
+
+// 2. Инициализация периферии
+HAL_UART_Init(&huart2);
+
+// 3. Включение прерываний (если нужно)
+HAL_NVIC_SetPriority(USART2_IRQn, 0, 0);
+HAL_NVIC_EnableIRQ(USART2_IRQn);
+----
+
+
+=== Настройка DMA для USART
+
+[source,cpp]
+.Ключевые биты для DMA
+----
+typedef struct {
+  uint32_t DMAT    :1;  // Bit 7: DMA для передачи (1=вкл)
+  uint32_t DMAR    :1;  // Bit 6: DMA для приёма (1=вкл)
+  uint32_t HDSEL   :1;  // Bit 3: Полудуплексный режим
+  uint32_t EIE     :1;  // Bit 0: Прерывание по ошибке
+} USART_CR3_Bits;
+----
+
+Пример включения DMA для передачи: USART1->CR3 |= USART_CR3_DMAT;  // Включить DMA для TX
+
+Конфигурация DMA:
+
+. Включите DMA для USART2:
+** TX Mode: Memory to Peripheral
+**  RX Mode: Peripheral to Memory
+. Настройте приоритет: Medium
+. Режим: Normal (не Circular для однократной передачи)
+
+
+[source,cpp]
+.Инициализация в коде
+----
+// Структура DMA для передачи
+DMA_HandleTypeDef hdma_usart2_tx;
+hdma_usart2_tx.Instance = DMA1_Channel4;
+hdma_usart2_tx.Init = {
+  .Direction = DMA_MEMORY_TO_PERIPH,
+  .PeriphInc = DMA_PINC_DISABLE,
+  .MemInc = DMA_MINC_ENABLE,
+  .PeriphDataAlignment = DMA_PDATAALIGN_BYTE,
+  .MemDataAlignment = DMA_MDATAALIGN_BYTE,
+  .Mode = DMA_NORMAL,
+  .Priority = DMA_PRIORITY_MEDIUM
+};
+HAL_DMA_Init(&hdma_usart2_tx);
+
+// Привязка DMA к USART2
+__HAL_LINKDMA(&huart2, hdmatx, hdma_usart2_tx);
+----
+
+Обработка прерываний DMA.
+
+[source,cpp]
+.Включение прерываний и обработчик прерывания
+----
+//----------Включение прерываний
+HAL_NVIC_SetPriority(DMA1_Channel4_IRQn, 0, 0);
+HAL_NVIC_EnableIRQ(DMA1_Channel4_IRQn);
+
+//----------Обработчик прерывания
+void DMA1_Channel4_IRQHandler(void) {
+  HAL_DMA_IRQHandler(&hdma_usart2_tx);
+}
+// Колбэк при завершении передачи
+void HAL_UART_TxCpltCallback(UART_HandleTypeDef *huart) {
+  if (huart->Instance == USART2) {
+    // Данные отправлены
+  }
+}
+----
+
+DMA нужен для:
+
+. Передачи логов на ПК без нагрузки на CPU;
+. Приём команд с автоматическим заполнением буфера;
+. Реализации протокола Modbus RTU.
 
 
 
@@ -396,62 +915,3 @@ DS18B20 – высокоточный цифровой датчик темпер�
 
 == Код программы
 
-
-1. ВВЕДЕНИЕ
-2. Требования к разработке ПО
-2.1. Общие положения
-2.2. Основные задачи программного обеспечения
-2.3. Принцип работы системы
-2.3.1. Сбор данных
-2.3.2. Оцифровка и обработка
-2.3.3. Передача данных
-2.3.4. Интерфейсы и взаимодействие с оборудованием
-3. Анализ требований ПО
-3.1. Отладочная плата XNUCLEO-F411RE
-3.2. Настройка АЦП (аналогово-цифрового преобразователя)
-3.2.1. Назначение
-3.2.2. Используемые каналы и выводы
-3.2.3. Подробная настройка режима АЦП
-3.2.4. Конфигурация:
-3.2.5. Шаги настройки АЦП через регистры
-3.2.6. Регистрирующая логика
-3.3. Настройка таймера TIM2 (организация дискретизации)
-3.3.1. Параметры
-3.4. Передача значений по беспроводному интерфейсу должна осуществляться через модуль BlueTooth Bee HC–06.
-3.4.1. Плата расширения Accessory Shield
-3.5. Инициализация UART и модуля Bluetooth HC-06
-3.5.1. Назначение
-3.5.2. Аппаратная реализация
-3.5.3. Конфигурация UART через регистры
-3.5.4. Передача данных
-3.6. ПО должно измерять ускорение по трем осям, и переводить значения в напряжение
-3.6.1. Контроль порогового значения вибрации
-3.6.2. Порог для конкретного оборудования
-3.6.3. Расчёт результирующего ускорения
-3.6.4. Корректировка Vcc
-4. Разработка архитектуры в виде UML диаграммы
-5. Код программы
-
-
-
-[source,c++]
-.
-----
-
-----
-
-Интеграция с FreeRTOS BME280
-Выделите отдельную задачу для опроса BME280.
-
-Используйте очередь (xQueueSend) для передачи данных фильтрующему модулю.
-
-Для синхронизации используйте семафор (например, при изменении настроек через USART).
-
-Пример потока работы:
-
-sequenceDiagram
-    Task BME280->>BME280: Запрос измерения (Forced mode)
-    BME280-->>Task BME280: Данные готовы
-    Task BME280->>Queue: Отправка сырых данных
-    Task Filter->>Queue: Получение данных
-    Task Filter->>Task USART: Отправка отфильтрованных значений
