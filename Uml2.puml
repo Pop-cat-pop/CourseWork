@@ -1,0 +1,143 @@
+@startuml
+
+interface ILed
+{
+    +LightOff(): void
+    +LightOn(): void
+}
+class Led
+{
+    +LightOff(): void override
+    +LightOn(): void override
+    +Toggle(): void
+}
+
+interface IFilter
+{ 
+   +FilterValue(value: float): float
+}
+
+class Filter
+{
+    -oldValue: float
+    -dt: float&
+    -rc: float&
+    -isFirstTime: bool
+    +FilterValue(value: float): float override
+}
+
+interface ISensor
+{
+    +GetValue(): float
+}
+class Potentiometr
+{
+    +GetValue(): float override
+    +GetRawData(): uint16_t
+}
+
+interface IAlarm
+{
+    +IsAlarm(currentLevelCharge: float): bool
+}
+class AlarmLevelCharge
+{
+    -mThresholdValueLevelCharge: float
+    -&mRepository: IRepository
+    +IsAlarm(currentLevelCharge: float): bool override
+}
+
+interface IFormatter
+{
+    +Convert(str: std::string&): float
+}
+class Formatter
+{
+    -&mUsart: Usart
+    -mStr: std::string
+    +Convert(str: std::string&): float override
+}
+
+interface IRepository
+{
+    +Get(): float
+    +Set(newVAlue: void): void
+}
+class Repository
+{
+    -value: float
+    +Get(): float override
+    +Set(newVAlue: void): void override
+}
+
+class Config
+{
+    -SystemCoreClock: std::uint32_t
+    +registers_RCC(): void
+    +registers_GPIO(): void
+    +registers_ADC(): void
+    +registers_USART(): void
+}
+
+class Measurement
+{
+    -changePosition: bool
+    -&mAlarm: IAlarm
+    -&mAlarm: IFilter
+    -&mSensor: ISensor
+    -&mLed: ILed
+    +EventLed(): void
+}
+
+class Usart
+{
+    -{static} bufferSize: std::size_t
+    -mReceiveBuffer: std::array<char, bufferSize>
+    -mReceiveIndex: std::size_t
+    -mMessageReady: bool
+    +IsMessageReady(): bool
+    +{static} Instance(): Usart&
+    +IsMessageReady(): bool
+    +GetMessage(): std::string
+    +HandleInterrupt(): void
+}
+class TaskMeasurement
+{
+    -&mMeasurement: Measurement
+    +Execute(): void override
+}
+
+class TaskUsart
+{
+    -UsartValue: std::string
+    -&mUsart: Usart
+    -&mFormatter: IFormatter
+    -&mRepository: IRepository
+    +Execute(): void override
+    +GetToRepositoryUsartValue(): void
+}
+
+interface IThread
+{
+  void Execute()
+}
+
+Led --|> ILed
+Filter --|> IFilter
+Potentiometr --|> ISensor
+AlarmLevelCharge --|> IAlarm
+Formatter --|> IFormatter
+Repository --|> IRepository
+Measurement --|> TaskMeasurement
+TaskMeasurement --|> IThread
+TaskUsart --|> IThread
+IAlarm --o Measurement
+IFilter --o Measurement
+ISensor --o Measurement
+ILed --o Measurement
+Usart --o Formatter
+IFormatter --o TaskUsart
+IRepository --o AlarmLevelCharge
+IRepository --o TaskUsart
+
+@enduml
