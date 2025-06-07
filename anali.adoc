@@ -1,0 +1,1294 @@
+= Курсовая работа
+:toc:
+:toc-title:             Оглавление
+:toclevels:             5
+
+:autor1:                А.М. Анисимова 
+:autor2:                А.С. Рогозина
+:checker:               С.В. Колодий
+:numGroup:              КЭ-413
+:year:                  2025
+
+:imagesdir:             media
+:figure-caption:        Рисунок
+:table-caption:         Таблица
+:sectnums:              |,all|
+:note-caption:          Примечание
+:stem:                  latexmath
+
+include::titul.adoc[]
+
+== Требование к разработке ПО
+
+*   Используемая платформа: отладочная плата https://www.waveshare.com/product/arduino-2/boards-kits/nucleo/xnucleo-f411re.htm[XNucleo-F411RE];
+*   Питание должно быть автономным;
+*   Проект измеряет падение напряжения на потенциометре с точностью не меньше 0,01 В;
+*   Если напряжение находится в аварийной зоне, то зажигается светодиод;
+**  Время срабатывания: 50 мс;
+*   Проект показывает критическое значение уровня заряда аккумулятора, но так как аккумулятора нет, то используется потенциометр для создания переменного напряжения.
+
+*   Система получает данные с компьютера при помощи протокола USART2;
+*   Полученные значения являются порогом критических значений;
+*   Таким образом происходит замена порогового значения с компьютера;
+*   Архитектура должна быть представлена в виде UML-диаграмм (пакет StarUML);
+*   Программная реализация: язык C++, компилятор ARM 8.40.2;
+*   При разработке должна использоваться Операционная Система Реального Времени FreeRTOS и https://github.com/lamer0k/RtosWrapper[С++ обертка над ней].
+
+
+
+== Анализ требований ПО
+
+=== Отладочная плата XNucleo-F411RE
+
+XNUCLEO-F411RE – это отладочная плата от компании Waveshare с поддержкой Arduino, которая позволит изучить возможности микроконтроллера STM32F411RET6 на базе ядра Cortex-M3. Функционал платы можно легко расширить, подключив к ней Arduino шилды, а также на плате есть разъемы, через которые вы получите полный доступ к линиям микроконтроллера портов ввода/вывода (I/O). Поддержка mbed делает возможным быстрое построение прототипа устройства с использованием SDK и online инструментов. Плата поставляется с отдельным модулем ST-Link/ V2.
+
+.Отладочная плата XNUCLEO-F411RE
+media::1.jpg[]
+
+
+Технические характеристики микроконтроллера STM32F411RET6:
+
+- Ядро: ARM 32-Бит Cortex-M4;
+- Рабочая частота: 100МГц;
+- Рабочее напряжение: 1.7…3.6В;
+- Память: 512кБ Flash, 128кБ SRAM;
+- Интерфейсы: 1 x SDIO, 1 x USB 2.0 FS, 5 x SPI or 5 x I2S, 3 x USART, 3 x I2C;
+- АЦП/ЦАП: 1 x АЦП (12 Бит, 16 каналов).
+
+
+=== Цифровая фильтрация
+
+[latexmath]
+++++
+\tau = \int\binom{1-e^\frac{-dt}{RC}, RC > 0 sec}{1,RC \leq 0 sec}
+++++
+[latexmath]
+++++
+FilteredValue = OldFiltered + (Value - OldValue) * \tau
+++++
+
+=== Проект должен измерять на патенциометре, установленного на плате расширения
+
+Переменный резистор, установленный на плате расширения, согласно спецификации Waveshare, подключен к аналоговому входу микроконтроллера, пин *PA0*.
+
+
+В плате расширения используется линейный потенциометр с тремя выводами:
+
+* один крайний вывод подключен в питанию (стандартное напряжение питания, необходимо определить точно с помощью прецизионного мультиметра);
+* другой крайний вывод подключен к земле;
+* центральный вывод выведен на аналоговый вход микроконтроллера (пин PA0).
+
+Таким образом, при вращении ручки потенциометра напряжение на центральном выводе изменяется от 0 В до 3,3 В.
+
+Поскольку напряжение - аналоговый сигнал, его нужно измерять с помощью аналого-цифрового преобразователя (АЦП).
+
+=== Для измерения напряжения должен использоваться встроенный АЦП с использованием DMA
+
+Микроконтроллер STM32F411RET6 оснащен 12-битным АЦП, поддерживающим 19 каналов и позволяющим имзерять сигналы из 16 внешних источников, 2 внутренних источников, а также канал VBAT (измерение напряжения на линии питания резервной батареи).
+
+Аналого-цифровое преобразование каналов может осуществляться в следующих режимах:
+
+* Single Mode (однократное преобразование) - для выбранного канала преобразование выполняется один раз и останавливается после завершения.
+* Continuous Mode (непрерывное преобразование) - автоматическое повторение преобразования выбранного канала без необходимости повторного запуска.
+* Scan Mode (режим сканирования) - АЦП выполняет преобразование для группы каналов, заданных в последовательности, по одному за раз. Этот режим не является самостоятельным, а комбинируется с Single или Continuous.
+* Discontinuous Mode (Прерывистый режим) - улучшенный режим  сканирования. Разбивает последовательность каналов на подгруппы. АЦП выполняет преобразование заданного числа каналов за один цикл, затем останавливается до следующего триггера.
+
+Поскольку, <<DMA, согласно требованиям к ПО>>, требуется использовать механизм DMA совместно с АЦП, следует использовать режим непрерывного преобразования. АЦП будет передавать считанные значения с помощью DMA автоматически по выбранному адресу, без использования ядра процессора.
+
+Для того, чтобы настроить АЦП в режиме непрерывного преобразования  и использовать его вместе с DMA, нужно:
+
+. подать тактирование на порт, который будет использоваться для считывания данных с АЦП;
+. настроить порт, подключенный к нужному каналу АЦП, на аналоговый вход;
+. подать тактирование на АЦП;
+. настроить разрешение АЦП;
+. настроить режим преобразования (регистр ADC_CR2);
+. установить количество каналов для опроса (поле L регистра ADC_SQR1);
+. выбрать нужный канал для измерения;
+. настроить канал АЦП на необходимую частоту преобразования;
+. подать тактирование на модуль DMA;
+. выбрать поток и канал DMA, соответствующие используемому АЦП;
+. указать адрес источника DMA (регистр данных АЦП, ADC_DR);
+. указать адрес назначения DMA (буфер в памяти для хранения данных);
+. настроить размер данных и направление передачи;
+. установить количество данных (размер буфера);
+. включить режим циклической передачи DMA (для непрерывного измерения);
+. включить запрос DMA в АЦП (бит DMA в регистре ADC_CR2);
+. включить АЦП;
+. начать преобразование АЦП (бит ADSTART в регистре ADC_CR2).
+
+
+=== USART-настройки
+
+Универсальный синхронный/асинхронный трансивер (universal synchronous asynchronous receiver transmitter, https://microsin.net/programming/arm/stm32f4xx-uart-and-usart.html?ysclid=mam63v6ser461546480[USART]) предоставляет гибкий способ полнодуплексного обмена с внешним оборудованием, что требуют промышленные стандарты последовательной асинхронной передачи данных в формате NRZ. USART можно настроить на скорость обмена в широком диапазоне благодаря использования дробного генератора скорости (fractional baud rate generator).
+
+Поддерживается однонаправленный обмен в любую сторону и полудуплексный обмен в обе стороны по одному проводу (half-duplex single wire). Также поддерживаются протоколы LIN (local interconnection network), Smartcard Protocol и IrDA (infrared data association) спецификаций SIR ENDEC и операции модема (CTS/RTS). Это позволяет реализовать мультипроцессорный обмен данными. Высокая скорость обмена поддерживается конфигурацией DMA для нескольких буферов.
+
+**Функциональное описание USART.**
+Bнтерфейс обычно подключается к внешним системам тремя ножками. Любой двунаправленный обмен USART требует как минимум двух сигнальных выводов: входные принимаемые данные (Receive Data In, RX) и выходные передаваемые данные (Transmit Data Out, TX):
+
+* RX: вход последовательных принимаемых данных. Используются техники передискретизации для восстановления данных, чтобы отделить полезные приходящие данные от шума;
+* TX: выход передаваемых данных. Когда передатчик запрещен, ножка выхода возвратит свою конфигурацию порта ввода/вывода (GPIO). Когда передатчик разрешен и ничего не передается, уровень выхода ножки TX находится в лог. 1. В режимах single-wire и smartcard, этот вывод I/O используется и для передачи, и для приема данных (на уровне USART данные затем принимаются на SW_RX).
+
+.Блок-схема USART
+image::USART1.png[]
+
+Через эти выводы в нормальном режиме USART передаются последоватьльные данные:
+
+. Состояние ожидания линии (Idle Line) до передачи или приема.
+. Start-бит.
+. Слово данных (8 или 9 бит), самый младший бит слова (LSB) идет первым.
+. 0.5,1, 1.5, 2 Stop-стоп-бит, показывающих завершение фрейма.
+. Используется дробный генератор скорости - с 12-разрядной мантиссой и 4-битной дробной частью.
+. Регистр статуса (USART_SR).
+. Регистр данных (USART_DR).
+. Регистр генератора скорости (USART_BRR) с 12-разрядной мантиссой и 4-битной дробной частью.
+. Регистр защитного времени, Guardtime Register (USART_GTPR) в случае использования режима Smartcard.
+
+
+Рассмотрим ключевые для работы регистры.
+
+.Карта памяти регистров USART
+image::USART2.png[]
+
+**Регистр данных (Data register, USART_DR)**
+
+.Data register (USART_DR)
+image::USART4.png[]
+
+Биты 31:9 зарезервированы, их значение должно сохраняться в состоянии сброса (все нули).
+
+DR[8:0] (биты 8 .. 0): Значение данных. Содержит принятый или передаваемый символ данных, в зависимости от операции с регистром - чтение или запись.
+
+Регистр данных выполняет двойную функцию (чтение и запись) поскольку физически он состоит из двух регистров - один для передачи (TDR) и еще один для приема (RDR). Регистр TDR предоставляет параллельный интерфейс между внутренней шиной и выходным регистром сдвига. Регистр RDR предоставляет параллельный интерфейс между входным регистром сдвига и внутренней шиной.
+
+
+**Регистр скорости передачи данных (Baud rate register, USART_BRR)**
+
+.Baud rate register (USART_BRR)
+image::USART3.png[]
+
+* Биты 31:16 зарезервированы, их значение должно сохраняться в состоянии сброса (все нули).
+* DIV_Mantissa[11:0] (биты 15:4): мантисса USARTDIV. Эти 12 бит определяют мантиссу делителя USART (USARTDIV).
+* DIV_Fraction[3:0] (биты 3:0): дробная часть USARTDIV. Эти 4 бита определяют дробную часть делителя USART (USARTDIV). Когда OVER8=1, бит DIV_Fraction3 не учитывается, и должен быть очищен.
+
+Дробный генератор скорости. Скорость обмена (baud rate) для приемника и передатчика (обоих сигналов RX и TX) устанавливается в одинаковое значение, программируемое коэффициентами Mantissa и Fraction делителя USARTDIV. USART_BRR рассчитывается по формуле:
+
+[latexmath]
+.Скорость для стандартного USART (включая режим SPI)
+++++
+BRR = \frac{f_{CK}}{8 \times (2 \times OVER8)\times USARTDIV}
+++++
+где \({f_{CK}}\) – тактовая частота USART (обычно 84 МHz на STM32F4); +
+\(USARTDIV\) – число с фиксированной запятой без знака, закодированное в регистре USART_BRR; +
+
+* Когда \(OVER8 =0\), дробная часть кодируется 4 битами, и программируется битами DIV_fraction[3:0] регистра USART_BRR.
+* Когда \(OVER8 =1\), дробная часть кодируется 3 битами, и программируется битами DIV_fraction[2:0] регистра USART_BRR, и бит DIV_fraction[3] должен сохраняться сброшенным в 0.
+
+
+=== Обеспечение точности не менее 0,01 В
+
+Для того, чтобы обеспечить измерение напряжения с требуемой точностью, необходимо обеспечить корректную работу АЦП в непрерывном режиме с передачей данных через DMA.
+
+Точность измерения напряжения определяется следующими факторами:
+
+. Разрешение АЦП: Количество бит влияет на шаг квантования (latexmath:[\Delta V])
+. Опорное напряжение: Задает диапазон измерений
+. Частота АЦП: Влияет на длительность выборки  преобразования
+
+==== Выбор параметров тактирования
+
+Поскольку в требованиях к ПО не сказано, каким должно быть потребление ресурсов, было решено использовать внешний кварцевый генератор с частотой тактирования 8 МГц. Его будет достаточно для выполнения всех задач.
+
+==== Выбор разрешения АЦП
+
+В STM32F411RET6 АЦП поддерживает разрешения 6, 8, 10 и 12 бит. Формула расчета шага квантования:
+
+[%center]
+[latexmath]
+++++
+\Delta V = \frac{V_{ref}}{2^n},
+++++
+
+где latexmath:[V_{ref} = 3,3 V] - опорное напряжение;
+   latexmath:[n] - разрядность АЦП.
+Рассмотрим варианты квантования при различных разрешениях.
+
+При latexmath:[n] = 8 бит:
+
+[%center]
+[latexmath]
+++++
+\Delta V = \frac{3,3}{2^8} = \frac{3,3}{256} = 12,891 mV
+++++
+
+При latexmath:[n] = 10 бит:
+
+[%center]
+[latexmath]
+++++
+\Delta V = \frac{3,3}{2^{10}} = \frac{3,3}{1024} = 3,223 mV
+++++
+
+При latexmath:[n] = 12 бит:
+
+[%center]
+[latexmath]
+++++
+\Delta V = \frac{3,3}{2^{12}} = \frac{3,3}{4096} = 0,806 mV
+++++
+
+Как можно заметить, 8 бит разрешения не достаточно для обеспечения требуемой точности. 10 бит хватает, но для обеспечения большей устойчивости к шумам следует выбрать разрешение *12 бит*, т.е. установить в регистре ADC_CR1 в поле RES биты 00.
+
+==== Выбор времени преобразования АЦП
+
+Время преобразования необходимо выбрать таким, чтобы оно было меньше заданного периода измерения, т.е. 50 мс.
+
+Чем больше время преобразования, тем точнее преобразованное значение. Руководствуясь этим суждением, следует выбрать время преобразования, максимально близкое к 50 мс.
+
+АЦП тактируется от шины APB2, частота которой в контексте данной задачи равна 8 МГц. В регистре ADC_CCR в поле ADCPRE настраивается значение предделителся частоты. Его минимальное значение составляет 2 (биты 00). Тогда, АЦП тактируется от частоты latexmath:[\frac{8 MHz}{2} = 4 MHz].
+
+Время одного такта АЦП равно:
+
+[%center]
+[latexmath]
+++++
+T_{cycle} = \frac{1}{4 \cdot 10^6} = 0,25 μs.
+++++
+
+Время выборки АЦП определяется по формуле:
+
+[%center]
+[latexmath]
+++++
+T_{sample} = N_{sample} \cdot T_{cycle},
+++++
+
+где latexmath:[N_{sample}] - количество циклов выборки (настраивается в регистре ADC_SMPR2, поле SMP0).
+
+Время преобразования АЦП определяется по формуле:
+
+[%center]
+[latexmath]
+++++
+T_{conversion} = (N_{sample} + N_{resolution}) \cdot T_{cycle},
+++++
+где latexmath:[N_{sample}] - количество циклов выборки (настраивается в регистре ADC_SMPR2, поле SMP0); latexmath:[N_{resolution}] - разрешение АЦП (было выбрано 12 бит).
+
+== Настройка регистров
+
+[[table_RCC]]
+.Настройки регистров тактирования
+|===
+| Регистр | Поле[номера битов] | Значение | Назначение
+.3+| RCC_CR | HSEON[16] | 1 | Включение тактирования от внешнего кварцевого генератора (8 МГц)
+| HSERDY[17] | 1 | 1 - генератор стабилен и готов к работе
+| HSION[0] | 0 | Отключение внутреннего генератора (16 МГц) после выключения HSE 
+| RCC_CFGR | SW[1:0] | 01 | Выбрать HSE в качестве системной частоты
+.2+| RCC_AHB1ENR | GPIOAEN[0] | 1 | Включено тактирование порта ввода-вывода A
+| USART2EN[17] | 1 | Подать тактирование на USART2
+| RCC_APB2ENR | ADC1EN[8] | 1 | Включить тактирование для АЦП
+|===
+
+[[table_GPIO]]
+.Настройки регистров GPIO
+|===
+| Регистр | Поле[номера битов] | Значение | Назначение
+.5+| GPIOA_MODER | MODER0[1:0] | 11 |  Настройка PA0 в аналоговый режим для потенциомерта
+| MODER2[5:4] | 10 |  Настройка PA2 в режим альтернативной функции (для UART TX)
+| MODER3[7:6] | 10 |  Настройка PA3 в режим альтернативной функции (для UART RX)
+.2+| GPIOA_AFRL | AFRL2[11:8] | 0010 | Установить USART TX как альтернативную функцию для PA2
+| AFRL1[15:12] | 0011 | Установить USART RX как альтернативную функцию для PA3
+|===
+
+[[table_ADС]]
+.Настройки регистров АЦП
+|===
+| Регистр | Поле[номера битов] | Значение | Назначение
+| ADC_CR1 | RES[25:24] | 00 | Настройка разрешения 12 бит
+.3+| ADC_CR2 | CONT[1] | 1 | Включение непрерывного режима
+| SWSTART[30] | 1 | Запуск преобразования
+| EOCS[10] | 1 | Установка типа окончания преобразования: бит окончания преобразования EOC устанавливается после окончания преобразования для каждого канала
+| ADC_SQR1 | L[23:20] | 0000 | Количество преобразований в последовательности регулярных каналов (1 преобразование)
+.3+| ADC_SQR3 | SQ1[4:0] | 0000 | Порядок преобразования каналов - IN0 преобразовывается первым
+| ADC_SR | EOC[1] | 1 | Завершение преобразования
+| ADC_DR | DATA[15:0] | Регистор для чтение результата
+|===
+
+Поскольку было решено передавать данные по UART раз в 100 мс, то большая скорость передачи данных не требуется. За основу возьмём скорость передачи данных 9600 бод.
+
+Формат передаваемых данных: "XX.XX" - 5 символов = 5 байт.
+
+[%center]
+[latexmath]
+.Формула времени передачи одного байта
+++++
+t_{byte} = \frac{10}{9600} = 1,0416 мс.
+++++
+
+[%center]
+[latexmath]
+.Формула времени передачи пакета данных
+++++
+t_{transmit} = 5 \cdot t_{byte} = 5,208 мс.
+++++
+
+Скорость передачи данных в UART определяется значением, записанным в регистр USART_BRR. Это значение рассчитывается по следующей формуле:
+
+[%center]
+[latexmath]
+.Расчёт USART_BRR (Baud Rate Register)
+++++
+USARTDIV = \frac{f_{CLK}}{BaudRate \cdot 8 \cdot (2 - OVER8)} = \frac{8000000}{16 \cdot 9600} = 52,08333,
+++++
+
+где latexmath:[f_{CLK}] - системная частота; +
+latexmath:[BaudRate] - желаемая скорость передачи данных, бод; +
+latexmath:[OVER8] - значение, записанное в поле OVER8 регистра USART_CR1 (режим дискретизации).
+
+Чем больше скорость - тем меньше делитель USARTDIV и больше ошибка от округления значения, записываемого в регистр USART_BRR.
+
+Целая часть - 52, дробная часть - 0,08333.
+
+В поле DIV_Mantissa регистра USART_BRR записывается 52 (0x340), в поле DIV_Fraction записывается округленное до ближайшего целого значение дробной части, т.е. 1 (0x001). Итого в регистр USART_BRR требуется записать значение 0x341.
+
+Рассчитаем ошибку для этого значения. При этом записанный в регистр делитель равен:
+latexmath:[USARTDIV = \frac{52 + 1}{16} = 52,0625]:
+
+[%center]
+[latexmath]
+++++
+Error = \left|\frac{V_{r} - V_{d}}{V_{d}}\right| \cdot 100 \%
+= \left|\frac{(\frac{f_{CLK}}{16 \cdot 52,0625}) - 9600}{9600}\right| \cdot 100 \%
+= \frac{9603,84 - 9600}{9600} \cdot 100 \%
+= 0,04 \%.
+++++
+
+Таким образом, реально записанная в регистр USART_BRR скорость составляет 9603,84 бод, с ошибкой 0,04%.
+
+[[table_USART]]
+.Регистры для настройки USART
+|===
+| Регистр | Поле[номера битов] | Значение | Назначение
+.5+| USART_CR1 | UE[13] | 1 | Включить UART
+| RE[2] | 1 | Разрешить прием
+| M[12] | 0 | Установить формат передаваемого байта: 1 стартовый бит + 8 бит данных
+| PCE[10] | 0 | Отключить четность
+| OVER8[15] | 0 | Установить дискретизацию 1/16
+| USART_CR2 | STOP[13:12] | 00 | 1 стоп-бит
+.2+| USART_BRR | DIV_Mantissa[15:4]| 52 | Скорость передачи 9600 бод
+| DIV_Fraction[3:0] | 1 | Скорость передачи 9600 бод
+| USART_SR | TXE (7) | Переменное | Бит устанавливается, когда буфер передачи пуст. Срабатывает прерывание
+| NVIC_ISER1 | 38 - 32 = 6 (номер в таблице векторов прерываний) | 1 | Разрешить прерывания для UART 
+|===
+
+== Разработка архитектуры ПО
+
+.Общая архитектура проекта
+[plantuml]
+----
+include::Uml1.puml[]
+----
+
+.Полная архитектура проекта
+[plantuml]
+----
+include::Uml2.puml[]
+----
+
+== Код программы
+
+Задачи проекта, наследующие интерфейс *IThread* для подключения системы к RTOS:
+
+*   *TaskMeasurement* - задача раз в 50мс сравнивает полученное напряжение от потенциометра с границей аварийной зоны и включает диод в случае аварии. Для этой задачи реализованы классы интерфейсов *IAlarm*, *IFilter*, *ISensor* и *ILed*. Вся логика сначала реализованна в классе *Measurement*, а только потом передается в задачу;
+*   *TaskUsart* - задача с интервалом в 50мс опрашивает получение сообщения. Если сообщение было получено, то оно конвертируется из строки в тип данных float при помощи класса интерфейса *IFormatter* и используется для создание новой границы аварийной зоны. Вся логика сначала реализованна в классе *Usart*, а только потом передается в задачу. 
+
+Две эти задачи соеденены интерфейсом *IRepository* для передачи полученных данных из *TaskUsart* в *AlarmLevelCharge*.
+
+=== Задачи
+
+Для уменьшения объёмов отчета все файлы не будут разделены на .h и .c.
+
+==== Класс TaskMeasurement.h
+
+*TaskMeasurement* - задача измерения. Раз в 50 мс берет значения счетов АЦП, переводит их в напряжение, фильтрует, сравнивает напряжение с пороговым аварийным значением и зажигает/выключает светодиод при большем/меьшем значении. 
+
+Исходный код класса *TaskMeasurement*:
+
+.TaskMeasurement.h
+[source, h]
+----
+#ifndef TASKMEASUREMENT_H
+#define TASKMEASUREMENT_H
+
+#include "Measurement.h"        // for Measurement
+#include "thread.hpp"           // for OsWrapper::Thread     
+
+class TaskMeasurement : public OsWrapper::Thread<512U>
+{
+public: 
+  TaskMeasurement(Measurement &measurement) : mMeasurement(measurement)
+  {
+  }
+  void Execute() override
+  {
+    for(;;)
+    {
+      mMeasurement.EventLed();
+      SleepUntil(50ms);    
+    } 
+  }
+private:
+  Measurement &mMeasurement;
+};
+#endif
+----
+
+==== Класс TaskUsart.h
+
+*TaskUsart* - задача получение переменной с компьютера. Раз в 50мс проверяет поступило ли сообщение с компьютера, получает сообщение, переводит сообщение из строки в переменую типа float и передает значение для использования его как порогового значения аварийной ситуации. 
+
+Исходный код класса **:
+.TaskUsart.h
+[source, h]
+----
+#ifndef TASKUSART_H
+#define TASKUSART_H
+      
+#include "Usart.h"                      // for Usart
+#include "IFormatter.h"                 // for IFormatter
+#include "thread.hpp"                   // for OsWrapper::Thread
+#include "IRepository.h"                // for IRepository
+
+class TaskUsart : public OsWrapper::Thread<512U>
+{
+public: 
+  TaskUsart(IFormatter &formatter, Usart &usart, IRepository &repository) : mFormatter(formatter), mUsart(usart), mRepository(repository)
+  {
+  }  
+  void GetToRepositoryUsartValue()
+  {
+    auto message = mUsart.GetMessage();
+    auto formatMessage = mFormatter.Convert(message);
+    mRepository.Set(formatMessage);
+  }
+  void Execute() override
+  {
+    for(;;)
+    {
+      if (mUsart.IsMessageReady())
+      {
+        GetToRepositoryUsartValue();               
+      }
+      SleepUntil(50ms);  
+    } 
+  } 
+private:
+  std::string UsartValue;
+  Usart &mUsart;
+  IFormatter &mFormatter;
+  IRepository &mRepository;
+};
+#endif
+----
+
+=== Настройка регистров, класс Config
+
+Класс *Config* нужен для настройки регистров тактирования, портов, АЦП, юсарата и преываний.
+
+.Config.h
+[source, h]
+----
+#ifndef CONFIG_H
+#define CONFIG_H
+
+#include <cstdint>                      // for std
+#include "rccregisters.hpp"             // for RCC
+#include "gpiocregisters.hpp"           // for GPIOC
+#include "nvicregisters.hpp"            // for NVIC
+#include "extiregisters.hpp"            // for EXTI
+#include "syscfgregisters.hpp"          // for CFGR
+#include "tim5registers.hpp"            // for TIM5
+#include "gpioaregisters.hpp"           // for GPIOA
+
+#include "gpioaregisters.hpp"
+#include "usart2registers.hpp"
+#include "nvicregisters.hpp"
+#include "adc1registers.hpp"
+
+#include "TaskUsart.h"                  // for TaskUsart.HandleInterrupt();
+
+
+class Config
+{
+public:
+  void registers_RCC()
+  {
+    //Switch on external 8 MHz oscillator
+    RCC::CR::HSEON::On::Set();
+    while (RCC::CR::HSERDY::NotReady::IsSet())
+    {
+    }
+    //Switch system clock on external oscillator
+    RCC::CFGR::SW::Hse::Set();
+    while (!RCC::CFGR::SWS::Hse::IsSet())
+    {
+    }
+    RCC::CR::HSION::Off::Set();   
+    //Switch on clock on PortA
+    RCC::AHB1ENR::GPIOAEN::Enable::Set();   
+    RCC::APB2ENR::SYSCFGEN::Enable::Set();
+    // RCC on ADC
+    RCC::APB2ENR::ADC1EN::Enable::Set();
+    // RCC on USART2
+    RCC::APB1ENR::USART2EN::Enable::Set();
+  }
+  
+  void registers_GPIO()
+  {
+    //LED1 on PortA.5, set PortA.5 as output
+    GPIOA::MODER::MODER5::Output::Set();   
+    // Potentiometer on Port A0
+    GPIOA::MODER::MODER0::Analog::Set();  
+    GPIOA::MODER::MODER2::Alternate::Set();
+    GPIOA::MODER::MODER3::Alternate::Set();
+    GPIOA::AFRL::AFRL2::Af7::Set();
+    GPIOA::AFRL::AFRL3::Af7::Set();
+  }
+  
+  void registers_ADC()
+  {  
+    ADC1::CR1::RES::Bits12::Set();                      // 12-битное разрешение
+    ADC1::CR2::EOCS::SingleConversion::Set();           // Флаг EOC после каждого преобразования
+    ADC1::CR1::SCAN::Enable::Set();
+    ADC1::CR2::DMA::Disable::Set();                     //Выключение DMA
+    ADC1::CR2::CONT::SingleConversion::Set();           // Одиночное преобразование (без DMA)
+    ADC1::SQR1::L::Conversions1::Set();                 // 1 канал в последовательности
+    ADC1::SQR3::SQ1::Channel0::Set();                   // Канал 0 (PA0)
+    ADC1::SMPR2::SMP0::Cycles480::Set();                // Время выборки (для большей точности)
+    ADC1::CR2::ADON::Enable::Set();                     // Первое включение   
+  } 
+  
+  void registers_USART()
+  {
+    USART2::CR1::OVER8::OversamplingBy16::Set();
+    USART2::CR1::M::Data8bits::Set();
+    USART2::CR1::PCE::ParityControlDisable::Set();
+    USART2::CR2::STOP::Value0::Set();
+    constexpr uint32_t SystemCoreClock = 8'000'000;
+    constexpr uint32_t BaudRate        = 9'600U;
+    double divisor = static_cast<double>(SystemCoreClock) / (BaudRate * 16.0);
+    uint32_t mant  = static_cast<uint32_t>(divisor);
+    uint32_t frac  = static_cast<uint32_t>(std::round((divisor - mant) * 16.0));
+    USART2::BRR::DIV_Mantissa::Set(mant);
+    USART2::BRR::DIV_Fraction::Set(frac); 
+    USART2::CR1::UE::Enable::Set();
+    USART2::CR1::RE::Enable::Set(); 
+  }
+private:
+  std::uint32_t SystemCoreClock = 8'000'000U;
+};
+#endif
+----
+
+
+=== Измерение данных, реализация интерфейса ISensor 
+
+Интерфейс *ISensor* реализуется в классе *Potentiometr*, где метод *GetRawData()* получает "сырые" значения из АЦП, а метод *GetValue()* приобразует значения с АЦП в переменную, которую можно использовать в дальннейшем. 
+
+.ISensor.h
+[source, h]
+----
+#ifndef ISENSOR_H
+#define ISENSOR_H
+
+class ISensor {
+public:    
+    virtual float GetValue() = 0;
+};
+#endif 
+----
+
+.Potentiometr.h
+[source, h]
+----
+#ifndef POTENTIOMETR_H
+#define POTENTIOMETR_H
+
+#include "ISensor.h"            //for ISensor
+#include "adc1registers.hpp"    //for ADC1::CR2::SWSTART::On::Set()
+#include <algorithm>            //for std::max and min
+
+class Potentiometr : public ISensor
+{
+public:    
+  float GetValue() override
+  {  
+    float percent = (static_cast<float>(GetRawData()) / 4095.0f) * 100.0f; 
+    return std::max(0.0f, std::min(percent, 100.0f));
+  } 
+  uint16_t GetRawData() 
+  { 
+    ADC1::CR2::SWSTART::On::Set();
+    return ADC1::DR::DATA::Get();
+  }
+};
+#endif 
+----
+
+=== Фильтрация данных, реализация интерфейса IFilter
+
+Интерфейс *IFilter* реализуется в классе *Filter*. Класс принимает фиксированные переменные dt и rc. Фильтрует полученные значения для избежания промахов. 
+
+.IFilter.h
+[source, h]
+----
+#ifndef IFILTER_HPP
+#define IFILTER_HPP
+
+class IFilter
+{
+public:
+  virtual float FilterValue(float value) = 0;
+};
+
+#endif
+----
+
+.Filter.h
+[source, h]
+----
+#ifndef FILTER_HPP
+#define FILTER_HPP
+
+#include "IFilter.h"    // for IFilter
+#include <cmath>        // for std::exp
+
+class Filter : public IFilter
+{
+public:
+  Filter(const float& dt, const float& rc) : dt(dt), rc(rc), oldValue(0.0f), isFirstTime(true)  
+  {
+  }
+  float FilterValue(float value) override
+  {
+    if (isFirstTime)
+    {
+      oldValue = value;
+      isFirstTime = false;
+      return value;
+    }   
+    float tau = 1.0f - std::exp(-dt / rc);
+    float filteredValue = oldValue + (value - oldValue) * tau;
+    oldValue = filteredValue;
+    return filteredValue;
+  }
+private:
+  const float& dt;
+  const float& rc;
+  float oldValue;
+  bool isFirstTime;
+};
+
+#endif
+----
+
+=== Управление светодиодом, реализация интерфейса ILed
+
+Интерфейс *ILed* реализуется в классе *Led*. Включает и выключает светодиод.
+
+.ILed.h
+[source, h]
+----
+#ifndef ILED_H
+#define ILED_H
+
+class ILed {
+  public:  
+  virtual void LightOff() = 0;
+  virtual void LightOn() = 0;
+};
+#endif 
+----
+
+.Led.h
+[source, h]
+----
+#ifndef LED_H
+#define LED_H
+
+#include "ILed.h" // for ILed
+
+template<typename Tport, int pinNumber> //Led<GPIOA, 5>
+class Led : public ILed
+{
+public:        
+  void LightOff() override
+  {
+    LightOn();
+    Toggle();
+  }
+  void LightOn() override
+  {
+    Tport::ODR::Set(1 << pinNumber); 
+  } 
+  void Toggle()
+  {
+    Tport::ODR::Toggle(1 << pinNumber);
+  }
+};
+#endif
+----
+
+=== Проверка аварийного состояния, реализация интерфейса IAlarm
+
+Интерфейс *IAlarm* реализуется в классе *AlarmLevelCharge*. Проверяет два значения: полученное напряжение с потенциометра и границу аварийного диапазона. В случае попадания в диапазон, выводит предупреждение. 
+
+.IAlarm.h
+[source, h]
+----
+#ifndef IALARM_H
+#define IALARM_H
+
+class IAlarm
+{
+public:
+  virtual bool IsAlarm(float currentLevelCharge) = 0;
+};
+#endif
+----
+
+.AlarmLevelCharge.h
+[source, h]
+----
+#ifndef ALARMLEVELCHARGE_H
+#define ALARMLEVELCHARGE_H
+
+#include "IAlarm.h"     // for IAlarm
+#include "IRepository.h" // for change mThresholdValueLevelCharge
+
+class AlarmLevelCharge : public IAlarm
+{
+public:
+  AlarmLevelCharge(float thresholdValueLevelCharge, IRepository &repository): mThresholdValueLevelCharge(thresholdValueLevelCharge), mRepository(repository)
+  {
+  }
+  bool IsAlarm(float currentLevelCharge) override
+  {
+    mThresholdValueLevelCharge = mRepository.Get();
+    if(mThresholdValueLevelCharge >= currentLevelCharge)
+    {
+      return true;
+    }    
+    return false;  
+  }  
+private:
+  float mThresholdValueLevelCharge;  
+  IRepository &mRepository;
+};
+#endif
+----
+
+=== Класс измерения для задачи TaskMeasurement
+
+Класс *Measurement* нужен для реализации логики задачи *TaskMeasurement*. Считывание напряжения, фильтрация данных, проверка на аварийное положение и переключение диода реализуются именно в этом классе. 
+ 
+
+.Measurement.h
+[source, h]
+----
+#ifndef MEASUREMENT_H
+#define MEASUREMENT_H
+
+#include "IAlarm.h"     // for IAlarm 
+#include "IFilter.h"    // for IFilter 
+#include "ISensor.h"    // for ISensor 
+#include "ILed.h"       // for ILed         
+
+class Measurement  
+{
+public:  
+  Measurement (IAlarm &alarm, IFilter &filter, ISensor &sensor, ILed &led): changePosition(true), mAlarm(alarm), mFilter(filter), mSensor(sensor), mLed(led)
+  {
+  }
+  void EventLed()
+  {   
+    auto currentValue = mFilter.FilterValue(mSensor.GetValue());
+    
+    if (mAlarm.IsAlarm(currentValue) && changePosition)
+    {
+      mLed.LightOn();
+      changePosition = false;
+    }
+    else if (!mAlarm.IsAlarm(currentValue) && (changePosition == false))
+    {
+      mLed.LightOff();
+      changePosition = true;
+    }
+  }
+private:
+  bool changePosition;
+  IAlarm &mAlarm; 
+  IFilter &mFilter;
+  ISensor &mSensor;
+  ILed &mLed;
+  
+};
+#endif
+----
+
+=== Класс коммуникации для задачи TaskUsart
+
+Класс *Usart* нужен для реализации логики задачи *TaskUsart*. Считывание полученного сообщения с терминала компьютера.
+
+.Usart.h
+[source, h]
+----
+#ifndef USART_H
+#define USART_H
+
+#include "usart2registers.hpp"  //for USART2::xxx
+#include "nvicregisters.hpp"    //for NVIC::ISER1::Write(1 << 6)
+#include <cstring>              //for std::string
+#include <array>                //for std::array
+
+class Usart
+{
+public:
+  Usart()
+  {
+    USART2::CR1::RXNEIE::InterruptWhenRXNE::Set();
+    NVIC::ISER1::Write(1 << 6);
+    HandleInterrupt();
+  }
+  static Usart& Instance()
+  {
+      static Usart instance;
+      return instance;   
+  }
+
+  bool IsMessageReady() const
+  {
+    return mMessageReady;
+  }
+  std::string GetMessage()
+  {
+    mMessageReady = false;
+    auto result = std::string(mReceiveBuffer.data(), mReceiveIndex);
+    mReceiveIndex = 0;
+    return result;
+  }
+  void HandleInterrupt()
+  {
+    if (!USART2::SR::RXNE::DataRecieved::IsSet())
+    {
+      return;
+    }         
+    char receivedChar = static_cast<char>(USART2::DR::Get());
+    if (receivedChar == '\r' || receivedChar == '\n')
+    {
+      if (mReceiveIndex > 0)
+      {
+        mReceiveBuffer[mReceiveIndex] = '\0';
+        mMessageReady = true;           
+      }
+      return;    
+    }
+    if (mReceiveIndex < bufferSize - 1)
+    {      
+      mReceiveBuffer[mReceiveIndex++] = receivedChar;
+    }
+    else
+    {        
+      mReceiveIndex = 0;
+    }
+  }
+private:
+  static constexpr std::size_t bufferSize = 64;
+  std::array<char, bufferSize> mReceiveBuffer;
+  std::size_t mReceiveIndex = 0;
+  bool mMessageReady = false;
+};
+
+#endif
+----
+
+=== Конфертация данных, реализация интерфейса IFormatter
+
+Интерфейс *IFormatter* реализуется в классе *Formatter*. Перевод переменной из строки в тип данных float.
+
+.IFormatter.h
+[source, h]
+----
+#ifndef IFORMATTER_HPP
+#define IFORMATTER_HPP
+
+#include <cstdint> // for std::uint8_t
+#include <string>
+
+class IFormatter
+{
+public:
+  virtual float Convert(std::string& str) = 0;
+};
+#endif
+----
+
+.Formatter.h
+[source, h]
+----
+#ifndef PARSER_HPP
+#define PARSER_HPP
+
+#include <iostream>
+#include <string>               // for string
+#include <stdexcept>            // for find('.')
+#include "TaskUsart.h"          // for string from comp
+#include "IFormatter.h"         // for IFormatter
+#include "Usart.h"              // for Usart
+
+class Formatter : public IFormatter
+{
+public:
+  Formatter(Usart &usart) : mUsart(usart)
+  {
+  }
+    float Convert(std::string& mStr) override
+    {
+      if (mStr.empty()) {
+         return 0;
+      }
+      float result = 0.0f;
+      size_t dot_pos = mStr.find('.');
+      bool has_decimal = (dot_pos != std::string::npos);
+      if (mStr.find('.', dot_pos + 1) != std::string::npos) {
+        return 0;
+      }
+      std::string integer_part = has_decimal ? mStr.substr(0, dot_pos) : mStr;
+      for (char c : integer_part) {
+        if (!isdigit(c)) {
+          break;
+        }
+        result = result * 10 + (c - '0');
+      }
+      if (has_decimal) 
+      {          
+        std::string fractional_part = mStr.substr(dot_pos + 1);
+        if (fractional_part.empty()) 
+        {
+            return 0;
+        }
+        float fraction = 0.0f;
+        float divisor = 10.0f;
+        
+        for (char c : fractional_part) 
+        {
+          if (!isdigit(c)) 
+          {
+            break;
+          }
+          fraction += (c - '0') / divisor;
+          divisor *= 10;
+        }
+        result += fraction;
+      }
+      return result;
+    }    
+private: 
+  Usart &mUsart;
+  std::string mStr = mUsart.GetMessage();
+};
+
+#endif
+----
+
+=== Сохранение данных, реализация интерфейса IRepository
+
+Интерфейс *IRepository* реализуется в классе *Repository*. Класс получает/отдает переменную для не связанных между собой объектов.
+
+.IRepository.h
+[source, h]
+----
+#ifndef IREPOSITORY_H
+#define IREPOSITORY_H
+
+class IRepository
+{
+public:
+  virtual float Get() = 0;
+  virtual void Set(float newValue) = 0;
+};
+#endif
+----
+
+.Repository.h
+[source, h]
+----
+#ifndef REPOSITORY_H
+#define REPOSITORY_H
+
+#include "IRepository.h" //for IRepository
+
+class Repository : public IRepository
+{
+public:
+  float Get() override
+  {
+    return value;
+  }
+  void Set(float newValue) override
+  {
+    value = newValue;
+  }
+private:
+  float value;
+};
+#endif
+----
+
+=== Файл прерываний 
+
+Все прерывания для проекта. 
+
+.startupF411RE.cpp
+[source, h]
+----
+/******************************************************************************
+ *  FILENAME: startupF411RE.cpp
+ *  
+ * DESCRIPTION: Ôàéë ñ âåêòîðàìè ïðåðûâàíèÿ äëÿ Cortex-M. äëÿ Ñ++.
+ * Ïîñêîëüêó ïî÷åìó-òî â Cortex-M âñå îáðàáîò÷èêè äîëæíû ïî èìåíè òî÷íî 
+ *  ñîâïàäàòü ñ èìåíà â òàáëèöå âåêòîðîâ, à íàçâàíèå ìåòîäà èç Ñ++ êëàññà 
+ * ñîâïàñòü ñ òàêîé òàáëèöåé ñî ñòàíäðàòíûìè ñòàðòàï ôàéëàìè íèêàê íå ìîæåò
+ * òî âîò ïðèõîäèòüñÿ òàêîé æå ïèñàòü íà Ñ++. 
+ * Âíèìàíèå!!!!!! Èìåíà êëàññîâ òî÷íî äîëæíû ñîâïàäàòü ñ èìåíàìè ó âàñ â ïðîåêòå
+ * Ìîæíî èçìåíèòü è ñîêðàòèòü êîëè÷åñòâî êëàññîâ, åñëè åñòü æåëàíèå, íàïðèìåð
+ *
+ * Copyright (c) 2018 by South Ural State University
+ * Author: Ñåðãåé Êîëîäèé
+ ******************************************************************************/
+
+#pragma language = extended
+#pragma segment = "CSTACK"
+#include "AHardware/IrqController/irqcontroller.hpp"
+#include "Rtos/wrapper/rtos.hpp"
+
+extern "C" void __iar_program_start( void );
+extern "C" void xPortPendSVHandler(void);
+
+
+class DummyModule
+{
+  public:
+    static void handler();
+};
+
+using tIntFunct = void(*)();
+//cstat !MISRAC++2008-9-5-1
+using tIntVectItem = union {tIntFunct __fun; void * __ptr;};
+
+// The vector table is normally located at address 0.
+// When debugging in RAM, it can be located in RAM, aligned to at least 2^6.
+// If you need to define interrupt service routines,
+// make a copy of this file and include it in your project.
+// The name "__vector_table" has special meaning for C-SPY:
+// it is where the SP start value is found, and the NVIC vector
+// table register (VTOR) is initialized to this address if != 0.
+
+#pragma location = ".intvec"
+//cstat !MISRAC++2008-0-1-4_b !MISRAC++2008-9-5-1
+extern "C" const tIntVectItem __vector_table[] =
+{
+  { .__ptr = __sfe( "CSTACK" ) },
+  __iar_program_start,
+
+  DummyModule::handler,
+  DummyModule::handler,
+  DummyModule::handler,
+  DummyModule::handler,
+  DummyModule::handler,
+  0,
+  0,
+  0,
+  0,
+  OsWrapper::Rtos::HandleSvcInterrupt,
+  DummyModule::handler,
+  0,
+  xPortPendSVHandler,
+  OsWrapper::Rtos::HandleSysTickInterrupt,
+  //External Interrupts
+  DummyModule::handler,         //Window Watchdog
+  DummyModule::handler,         //PVD through EXTI Line detect/EXTI16
+  DummyModule::handler,         //Tamper and Time Stamp/EXTI21 
+  DummyModule::handler,         //RTC Wakeup/EXTI22 
+  DummyModule::handler,         //FLASH
+  DummyModule::handler,         //RCC
+  DummyModule::handler,         //EXTI Line 0
+  DummyModule::handler,         //EXTI Line 1
+  DummyModule::handler,         //EXTI Line 2
+  DummyModule::handler,         //EXTI Line 3
+  DummyModule::handler,         //EXTI Line 4
+  DummyModule::handler,         //DMA1 Stream 0
+  DummyModule::handler,         //DMA1 Stream 1
+  DummyModule::handler,         //DMA1 Stream 2
+  DummyModule::handler,         //DMA1 Stream 3
+  DummyModule::handler,         //DMA1 Stream 4
+  DummyModule::handler,         //DMA1 Stream 5
+  DummyModule::handler,         //DMA1 Stream 6
+  DummyModule::handler,         //ADC1
+  0,                            //USB High Priority
+  0,                            //USB Low  Priority
+  0,                            //DAC
+  0,                            //COMP through EXTI Line
+  DummyModule::handler,         //EXTI Line 9..5
+  DummyModule::handler,         //TIM9/TIM1 Break interrupt 
+  DummyModule::handler,         //TIM10/TIM1 Update interrupt
+  DummyModule::handler,         //TIM11/TIM1 Trigger/Commutation interrupts
+  DummyModule::handler,		//TIM1 Capture Compare interrupt
+  DummyModule::handler,         //TIM2  	
+  DummyModule::handler,         //TIM3
+  DummyModule::handler,         //TIM4
+  DummyModule::handler,         //I2C1 Event
+  DummyModule::handler,         //I2C1 Error
+  DummyModule::handler,         //I2C2 Event
+  DummyModule::handler,         //I2C2 Error
+  DummyModule::handler,         //SPI1
+  DummyModule::handler,         //SPI2
+  DummyModule::handler,         //USART1
+  IrqController::HandleUsart2Irq,         //USART2
+  0,
+  IrqController::HandleIrqExtiLine15_10,         //EXTI Line 15..10
+  DummyModule::handler,         //EXTI Line 17 interrupt / RTC Alarms (A and B) through EXTI line interrupt
+  DummyModule::handler,         //EXTI Line 18 interrupt / USB On-The-Go  FS Wakeup through EXTI line interrupt
+  0,				//TIM6
+  0,				//TIM7  f0
+  0,
+  0,
+  DummyModule::handler,         //DMA1 Stream 7 global interrupt fc
+  0,
+  DummyModule::handler,	        //SDIO global interrupt
+  DummyModule::handler,	        //TIM5 global interrupt
+  DummyModule::handler,	        //SPI3 global interrupt
+  0,			        // 110
+  0,
+  0,
+  0,
+  DummyModule::handler,		//DMA2 Stream0 global interrupt 120
+  DummyModule::handler,		//DMA2 Stream1 global interrupt
+  DummyModule::handler,		//DMA2 Stream2 global interrupt
+  DummyModule::handler,		//DMA2 Stream3 global interrupt
+  DummyModule::handler,		//DMA2 Stream4 global interrupt 130
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  DummyModule::handler,		//USB On The Go FS global interrupt, 14C
+  DummyModule::handler,		//DMA2 Stream5 global interrupt
+  DummyModule::handler,		//DMA2 Stream6 global interrupt
+  DummyModule::handler,		//DMA2 Stream7 global interrupt
+  DummyModule::handler,				//USART6 15C
+  DummyModule::handler,         //I2C3 Event
+  DummyModule::handler,         //I2C3 Error 164
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  0,
+  DummyModule::handler,		//FPU 184
+  0,
+  0,
+  DummyModule::handler,		//SPI 4 global interrupt
+  DummyModule::handler		//SPI 5 global interrupt
+};
+
+void DummyModule::handler()   { for(;;) {} } ;
+
+extern "C" void __cmain( void );
+extern "C" __weak void __iar_init_core( void );
+extern "C" __weak void __iar_init_vfp( void );
+
+#pragma required=__vector_table
+void __iar_program_start( void )
+{
+  __iar_init_core();
+  __iar_init_vfp();
+  __cmain();
+}
+----
+
+=== Основной файл проекта
+
+Конфигурация всех регистров микрконтроллера, а также создание задач описывается в файле main.cpp. 
+Обе задачи имеют средний приоретет. Кроме того, основные параметры также указываются в этом файле, а именно:
+*   dt - интервал времени между измерениями (100 мс);
+*   rc - постоянная времени фильтра;
+
+.main.cpp
+[source, h]
+----
+#include "rtos.hpp"         // for Rtos
+#include "mailbox.hpp"      // for Mailbox
+#include "event.hpp"        // for Event
+
+#include "Config.h"                     // for Config.registers_ххх()
+#include "Led.h"                        // for Led<GPIOA, 5>
+#include "Filter.h"                     // for Filter filter(dt, rc)        
+#include "AlarmLevelCharge.h"           // for AlarmLevelCharge alarm       
+#include "Potentiometr.h"               // for Potentiometr potentiometr
+#include "Formatter.h"                  // for Formatter formatter
+#include "Measurement.h"                // for Measurement measurement
+#include "Usart.h"                      // for Usart usart
+#include "Repository.h"                 // for Repository repository
+#include "TaskMeasurement.h"            // for TaskMeasurement
+#include "TaskUsart.h"                  // for TaskUsart
+
+std::uint32_t SystemCoreClock = 8'000'000U;
+Config config;
+
+extern "C" {
+  int __low_level_init(void)
+  {
+    config.registers_RCC();
+    config.registers_GPIO();
+    config.registers_ADC();
+    config.registers_USART();
+    return 1;
+  }
+}
+
+Led<GPIOA, 5> led;
+Potentiometr potentiometr;
+
+constexpr auto dt = 0.1f;
+constexpr auto rc = 1.0f;
+Filter filter(dt, rc);
+
+Usart usart;
+Formatter formatter(usart);
+Repository repository;
+TaskUsart taskUsart(formatter, usart, repository);
+AlarmLevelCharge alarm(50.0f, repository);
+Measurement measurement(alarm, filter, potentiometr, led);
+OsWrapper::Event event{500ms, 1};
+TaskMeasurement taskMeashurement(measurement);
+
+int main()
+{
+  using namespace OsWrapper;
+  Rtos::CreateThread(taskMeashurement, "taskMeashurement", ThreadPriority::normal);
+  Rtos::CreateThread(taskUsart, "taskUsart", ThreadPriority::lowest);
+  Rtos::Start();
+  return 0;
+}
+----
+
+== Заключение 
+
+В рамках выполнения курсового проекта было разработано программное обеспечение для устройства индикации аварийного напряжения. Напряжение меняется потенциометром, установленным на плате расширения. Измерение и фильтрация напряжения производится раз в 50 мс, отправка значений по USART осуществляется раз также в 50 мс. Кроме того, в зависимости от текущего значения отфильтрованного напряжения осуществляется индикация светодиодами.
+
+Результаты готового устройства представлены на видео:
+
+* link:media/video1.mp4[Демонстрация индикации аварийного напряжения].

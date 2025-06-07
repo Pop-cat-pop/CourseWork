@@ -1,0 +1,46 @@
+@startuml
+
+interface ILed
+class Led
+Led --|> ILed
+
+interface IFilter
+class Filter
+Filter --|> IFilter
+
+interface ISensor
+class Potentiometr
+Potentiometr --|> ISensor
+
+interface IAlarm
+class AlarmLevelCharge
+AlarmLevelCharge --|> IAlarm
+
+interface IFormatter
+class Formatter
+Formatter --|> IFormatter
+
+interface IRepository
+class Repository
+Repository --|> IRepository
+
+class Config
+class Measurement
+Measurement --|> TaskMeasurement
+class Usart
+class TaskMeasurement
+TaskMeasurement --|> IThread
+class TaskUsart
+TaskUsart --|> IThread
+interface IThread
+
+IAlarm --o Measurement
+IFilter --o Measurement
+ISensor --o Measurement
+ILed --o Measurement
+Usart --o Formatter
+IFormatter --o TaskUsart
+IRepository --o AlarmLevelCharge
+IRepository --o TaskUsart
+
+@enduml
